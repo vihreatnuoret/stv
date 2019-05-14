@@ -177,15 +177,17 @@ def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count, allo
             if not is_elimination:
                 ballot.set_value(math.floor(weight / len(hopefuls) * 100) / 100)
             else:
-                ballot.add_weight(math.floor(100 / len(hopefuls)) / 100)
+                ballot.add_weight(1.0 / (len(hopefuls) + len(accepted)))
             current_value = ballot.get_value()
-            for recipient in hopefuls:
+            for recipient in hopefuls + accepted:
+                ballot_copy = Ballot(ballot.candidates)
+                ballot_copy.set_value(current_value)
                 if recipient in allocated or recipient in accepted:
-                    allocated[recipient].append(ballot)
-                    allocated_now[recipient].append(ballot)
+                    allocated[recipient].append(ballot_copy)
+                    allocated_now[recipient].append(ballot_copy)
                 else:
-                    allocated[recipient] = [ballot]
-                    allocated_now[recipient] = [ballot]
+                    allocated[recipient] = [ballot_copy]
+                    allocated_now[recipient] = [ballot_copy]
                 if recipient in vote_count:
                     vote_count[recipient] += current_value
                 else:
@@ -193,10 +195,10 @@ def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count, allo
                 vote_count[selected] -= current_value
                 reallocated = True
                 if (selected, recipient, current_value) in moves:
-                    moves[(selected, recipient, current_value)].append(ballot)
+                    moves[(selected, recipient, current_value)].append(ballot_copy)
                 else:
-                    moves[(selected, recipient, current_value)] = [ballot]
-                transferred.append(ballot)
+                    moves[(selected, recipient, current_value)] = [ballot_copy]
+                transferred.append(ballot_copy)
 
     for move, ballots in moves.iteritems():
         times = len(ballots)
@@ -383,7 +385,7 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
                 was_elected = elect_reject(candidate, vote_count, constituencies, quota_limit, current_round, elected, rejected,constituencies_elected)
                 if not was_elected:
                     redistribute_ballots(candidate, 1.0, hopefuls, allocated, vote_count, allocated_now, False, accepted)
-                if vote_count[candidate] - threshold >= 0:
+                if vote_count[candidate] - threshold > 0:
                     # Give the same weight to each of the candidates ballots. Rounding will be done in redistribute_ballots
                     
                     #if allocated_last_round[candidate]:
