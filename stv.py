@@ -333,7 +333,7 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
         if vote_count[hopefuls[i]] > threshold:
             elected_with_initial_votes.append(hopefuls[i])
 
-    while num_elected < seats and num_hopefuls > 0:
+    while num_elected < seats and (num_hopefuls > 0 or accepted):
         for candidate in hopefuls:
             if allocated_now[candidate]:
                 allocated_last_round[candidate] = allocated_now[candidate]
@@ -362,18 +362,19 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
         # If there is a surplus record it so that we can try to
         # redistribute the best candidate's votes according to their
         # next preferences
-        surplus = vote_count[hopefuls_sorted[0]] - threshold
+        
+        # Update the list of all candidates whose vote count exceeds the threshold
+        accepted_this_round = 0
+        for i in range(0, num_hopefuls):
+            if vote_count[hopefuls[i - accepted_this_round]] - threshold >= 0:
+                hopeful = hopefuls[i - accepted_this_round]
+                accepted.append(hopefuls[i - accepted_this_round])
+                hopefuls.remove(hopefuls[i - accepted_this_round])
+                accepted_this_round += 1
+        
         # If there is either a candidate with surplus votes, or
         # there are hopeful candidates beneath the threshold.
-        if accepted or surplus >= 0 or num_hopefuls <= (seats - num_elected):
-            # Update the list of all candidates whose vote count exceeds the threshold
-            accepted_this_round = 0
-            for i in range(0, num_hopefuls):
-                if vote_count[hopefuls[i - accepted_this_round]] - threshold >= 0:
-                    hopeful = hopefuls[i - accepted_this_round]
-                    accepted.append(hopefuls[i - accepted_this_round])
-                    hopefuls.remove(hopefuls[i - accepted_this_round])
-                    accepted_this_round += 1
+        if accepted or num_hopefuls <= (seats - num_elected):
             
             # Sort accepted by vote_count
             accepted = sorted(accepted, key=vote_count.get, reverse=True)
