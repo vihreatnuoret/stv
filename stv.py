@@ -75,6 +75,7 @@ class Ballot:
     def add_weight(self, weight):
         self.weights.insert(0, weight)
         self._value *= weight
+        self._value = math.floor(self._value * 100) / 100
 
     def set_value(self, value):
         self._value = value
