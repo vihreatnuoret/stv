@@ -76,6 +76,9 @@ class Ballot:
         self.weights.insert(0, weight)
         self._value *= weight
 
+    def set_value(self, value):
+        self._value = value
+
     def get_value(self):
         return self._value
     
@@ -118,7 +121,7 @@ def randomly_select_first(sequence, key, action, random_generator=None):
     return selected
         
     
-def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count):
+def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count, allocated_now, is_elimination, accepted):
     """Redistributes the ballots from selected to the hopefuls.
 
     Redistributes the ballots currently allocated to the selected
@@ -142,14 +145,17 @@ def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count):
         i = ballot.current_preference + 1
         while not reallocated and i < len(ballot.candidates):
             recipient = ballot.candidates[i]
-            if recipient in hopefuls:
+            if recipient in hopefuls or recipient in accepted:
                 ballot.current_preference = i
-                ballot.add_weight(weight)
+                if not is_elimination:
+                    ballot.set_value(math.floor(weight * 100) / 100)
                 current_value = ballot.get_value()
                 if recipient in allocated:
                     allocated[recipient].append(ballot)
+                    allocated_now[recipient].append(ballot)
                 else:
                     allocated[recipient] = [ballot]
+                    allocated_now[recipient] = [ballot]
                 if recipient in vote_count:
                     vote_count[recipient] += current_value
                 else:
@@ -163,6 +169,34 @@ def redistribute_ballots(selected, weight, hopefuls, allocated, vote_count):
                 transferred.append(ballot)
             else:
                 i += 1
+
+        # if the ballot has not been reallocated, give it to each candidate that may be elected
+        if not reallocated and i >= len(ballot.candidates) and hopefuls:
+            ballot.current_preference = i
+            if not is_elimination:
+                ballot.set_value(math.floor(weight / len(hopefuls) * 100) / 100)
+            else:
+                ballot.add_weight(math.floor(100 / len(hopefuls)) / 100)
+            current_value = ballot.get_value()
+            for recipient in hopefuls:
+                if recipient in allocated or recipient in accepted:
+                    allocated[recipient].append(ballot)
+                    allocated_now[recipient].append(ballot)
+                else:
+                    allocated[recipient] = [ballot]
+                    allocated_now[recipient] = [ballot]
+                if recipient in vote_count:
+                    vote_count[recipient] += current_value
+                else:
+                    vote_count[recipient] = current_value
+                vote_count[selected] -= current_value
+                reallocated = True
+                if (selected, recipient, current_value) in moves:
+                    moves[(selected, recipient, current_value)].append(ballot)
+                else:
+                    moves[(selected, recipient, current_value)] = [ballot]
+                transferred.append(ballot)
+
     for move, ballots in moves.iteritems():
         times = len(ballots)
         description =  "from {0} to {1} {2}*{3}={4}".format(move[0],
@@ -239,12 +273,15 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
     """
     
     allocated = {} # The allocation of ballots to candidates
+    allocated_now = {} # The allocation of ballots during current round
+    allocated_last_round = {} # The allocation of ballots after last election or elimination
     vote_count = {} # A hash of ballot counts, indexed by candidates
     candidates = [] # All candidates
     elected = [] # The candidates that have been elected
     hopefuls = [] # The candidates that may be elected
     # The candidates that have been eliminated because of low counts
     eliminated = []
+    elected_with_initial_votes = []
     # The candidates that have been eliminated because of quota restrictions
     rejected = []
     # The number of candidates elected per constituency
@@ -259,10 +296,8 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
 
     seed()
 
-    if droop:
-        threshold = int(1 + (len(ballots) / (seats + 1.0)))
-    else:
-        threshold = int(math.ceil(1 + len(ballots) / (seats + 1.0)))
+    # use the threshold specified in the rules:   ballots / (seats + 1) rounded upwards with the precision of two decimals
+    threshold = math.ceil(100 * (len(ballots) / (seats + 1.0))) / 100
 
     logger = logging.getLogger(SVT_LOGGER)
     logger.info(LOG_MESSAGE.format(action=Action.THRESHOLD,
@@ -277,6 +312,8 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
                 vote_count[candidate] = 0
             if candidate not in allocated:
                 allocated[candidate] = []
+                allocated_last_round[candidate] = []
+                allocated_now[candidate] = []
         allocated[selected].append(ballot)
         vote_count[selected] += 1
 
@@ -287,7 +324,22 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
     current_round = 1
     num_elected = len(elected)
     num_hopefuls = len(hopefuls)
+    accepted = []
+
+    for i in range(0, num_hopefuls):
+        if vote_count[hopefuls[i]] > threshold:
+            elected_with_initial_votes.append(hopefuls[i])
+
     while num_elected < seats and num_hopefuls > 0:
+        for candidate in hopefuls:
+            if allocated_now[candidate]:
+                allocated_last_round[candidate] = allocated_now[candidate]
+            allocated_now[candidate] = []
+        for candidate in accepted:
+            if allocated_now[candidate]:
+                allocated_last_round[candidate] = allocated_now[candidate]
+            allocated_now[candidate] = []
+
         # Log round
         logger.info(LOG_MESSAGE.format(action=Action.COUNT_ROUND,
                                        desc=current_round))
@@ -296,6 +348,13 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
        
         logger.info(LOG_MESSAGE.format(action=Action.COUNT,
                                        desc=description))
+
+        # Log count
+        description  = count_description(vote_count, accepted)
+       
+        logger.info(LOG_MESSAGE.format(action=Action.COUNT,
+                                       desc=description))
+
         hopefuls_sorted = sorted(hopefuls, key=vote_count.get, reverse=True )
         # If there is a surplus record it so that we can try to
         # redistribute the best candidate's votes according to their
@@ -303,31 +362,41 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
         surplus = vote_count[hopefuls_sorted[0]] - threshold
         # If there is either a candidate with surplus votes, or
         # there are hopeful candidates beneath the threshold.
-        if surplus >= 0 or num_hopefuls <= (seats - num_elected):
-            best_candidate = randomly_select_first(hopefuls_sorted,
-                                                   key=vote_count.get,
-                                                   action=Action.ELECT,
-                                                   random_generator=rnd_gen)
-            if best_candidate not in hopefuls:
-                print "Not a valid candidate: ",best_candidate
-                sys.exit(1)
-            hopefuls.remove(best_candidate)
-            was_elected = elect_reject(best_candidate, vote_count,
-                                       constituencies, quota_limit,
-                                       current_round, 
-                                       elected, rejected,
-                                       constituencies_elected)
-            if not was_elected:
-                redistribute_ballots(best_candidate, 1.0, hopefuls, allocated,
-                                     vote_count)
-            if surplus > 0:
-                # Calculate the weight for this round
-                weight = float(surplus) / vote_count[best_candidate]
-                # Find the next eligible preference for each one of the ballots
-                # cast for the candidate, and transfer the vote to that
-                # candidate with its value adjusted by the correct weight.
-                redistribute_ballots(best_candidate, weight, hopefuls,
-                                     allocated, vote_count)
+        if accepted or surplus >= 0 or num_hopefuls <= (seats - num_elected):
+            # Update the list of all candidates whose vote count exceeds the threshold
+            accepted_this_round = 0
+            for i in range(0, num_hopefuls):
+                if vote_count[hopefuls[i - accepted_this_round]] - threshold >= 0:
+                    hopeful = hopefuls[i - accepted_this_round]
+                    accepted.append(hopefuls[i - accepted_this_round])
+                    hopefuls.remove(hopefuls[i - accepted_this_round])
+                    accepted_this_round += 1
+            
+            # Sort accepted by vote_count
+            accepted = sorted(accepted, key=vote_count.get, reverse=True)
+
+            # Redistribute the votes of the current best candidate
+            if accepted:
+                candidate = accepted[0]
+                accepted.remove(candidate)
+                was_elected = elect_reject(candidate, vote_count, constituencies, quota_limit, current_round, elected, rejected,constituencies_elected)
+                if not was_elected:
+                    redistribute_ballots(candidate, 1.0, hopefuls, allocated, vote_count, allocated_now, False, accepted)
+                if vote_count[candidate] - threshold >= 0:
+                    # Give the same weight to each of the candidates ballots. Rounding will be done in redistribute_ballots
+                    
+                    #if allocated_last_round[candidate]:
+                    if candidate not in elected_with_initial_votes and allocated_last_round[candidate]:
+                        allocated[candidate] = allocated_last_round[candidate]
+                    
+                    weight = (vote_count[candidate] - threshold) / len(allocated[candidate])
+                    
+                    # Find the next eligible preference for each one of the ballots
+                    # cast for the candidate, and transfer the vote to that
+                    # candidate with its value adjusted by the correct weight.
+                    redistribute_ballots(candidate, weight, hopefuls,
+                                         allocated, vote_count, allocated_now, False, accepted)
+
         # If nobody can get elected, take the least hopeful candidate
         # (i.e., the hopeful candidate with the less votes) and
         # redistribute that candidate's votes.
@@ -342,8 +411,10 @@ def count_stv(ballots, seats, droop = True, constituencies = None,
             d = worst_candidate + " = " + str(vote_count[worst_candidate])
             msg = LOG_MESSAGE.format(action=Action.ELIMINATE, desc=d)
             logger.info(msg)
-            redistribute_ballots(worst_candidate, 1.0, hopefuls, allocated,
-                                 vote_count)
+            
+            if allocated[worst_candidate]: # if worst candidate has ballots redistribute them
+                redistribute_ballots(worst_candidate, 1.0, hopefuls, allocated,
+                                     vote_count, allocated_now, True, accepted)
             
         current_round += 1
         num_hopefuls = len(hopefuls)
